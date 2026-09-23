@@ -1,0 +1,5 @@
+# CUDA runtime pieces for faster-whisper/CTranslate2 GPU inference.
+# Installed only on GPU hosts (Lappy) by deploy-lappy.sh; the CPU-only
+# Server2 unit does not need these.
+nvidia-cublas-cu12>=12,<14
+nvidia-cudnn-cu12>=9,<10

@@ -14,6 +14,7 @@ echo "→ Creating/updating venv"
 python3 -m venv venv
 venv/bin/pip install --quiet --upgrade pip
 venv/bin/pip install --quiet -r requirements.txt
+venv/bin/pip install --quiet -r requirements-cuda.txt
 venv/bin/pip check
 
 echo "→ Resolving NVIDIA pip library directories for LD_LIBRARY_PATH"
