@@ -1,0 +1,6 @@
+aiohttp>=3.9,<4
+faster-whisper>=1.2,<2
+sherpa-onnx>=1.13,<2
+numpy>=1.26
+pytest>=8
+pytest-asyncio>=0.24

@@ -1,0 +1,43 @@
+[Unit]
+Description=pi-stt-server HTTP server — Lappy GPU whisper (faster-whisper CUDA)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/pi-stt-server
+ExecStart=%h/pi-stt-server/venv/bin/python %h/pi-stt-server/stt_server.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=11min
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pi-stt-server
+Environment=STT_PRIMARY_ENGINE=whisper
+Environment=STT_FALLBACK_ENGINE=
+Environment=WHISPER_MODEL=large-v3-turbo
+Environment=WHISPER_DEVICE=cuda
+Environment=WHISPER_COMPUTE=int8_float16
+Environment=STT_IDLE_TIMEOUT_MS=1800000
+Environment=SHUTDOWN_DRAIN_TIMEOUT_MS=600000
+# Host-specific paths (LD_LIBRARY_PATH for the pip-installed cuBLAS/cuDNN
+# libraries) live in %h/pi-stt-server/lappy.env — untracked, created at
+# deployment. LD_LIBRARY_PATH is required there for CTranslate2 CUDA.
+EnvironmentFile=%h/pi-stt-server/lappy.env
+UMask=0077
+
+# /dev/nvidia* must be reachable: no PrivateDevices here (unlike the Server2
+# CPU unit, which keeps PrivateDevices=true).
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+MemoryHigh=6G
+MemoryMax=8G
+LimitNOFILE=4096
+LimitCORE=0
+
+[Install]
+WantedBy=default.target

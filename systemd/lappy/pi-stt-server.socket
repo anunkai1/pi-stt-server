@@ -1,0 +1,13 @@
+[Unit]
+Description=On-demand loopback socket for pi-stt-server (Lappy GPU whisper)
+
+[Socket]
+ListenStream=127.0.0.1:8182
+FileDescriptorName=stt
+Service=pi-stt-server.service
+Accept=no
+NoDelay=true
+Backlog=128
+
+[Install]
+WantedBy=sockets.target
