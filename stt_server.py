@@ -486,12 +486,17 @@ async def shutdown(reason: str) -> None:
     shutting_down = True
     log(f"received {reason}; draining {active_transcriptions} transcription(s)")
     idle.stop()
+    code = 0
     try:
         await asyncio.wait_for(_drain(), timeout=SHUTDOWN_DRAIN_TIMEOUT_MS / 1000.0)
-        sys.exit(0)
     except asyncio.TimeoutError:
         log(f"shutdown drain exceeded {SHUTDOWN_DRAIN_TIMEOUT_MS}ms")
-        sys.exit(1)
+        code = 1
+    # Exit hard: sys.exit inside an event-loop task would never reach the
+    # interpreter (the exception lands in an unretrieved task instead),
+    # leaving a 'stopped' server alive. systemd owns the process lifecycle;
+    # os._exit is the only reliable exit here.
+    os._exit(code)
 
 
 async def _drain() -> None:
@@ -500,14 +505,19 @@ async def _drain() -> None:
     await stop_server()
 
 
-def main() -> None:
-    def _request_shutdown(*_: Any) -> None:
+def request_shutdown(reason: str) -> None:
+    try:
         asyncio.get_running_loop().call_soon(
-            lambda: asyncio.ensure_future(shutdown("SIGTERM"))
+            lambda: asyncio.ensure_future(shutdown(reason))
         )
+    except RuntimeError:
+        # No running loop yet (signal before startup finished): exit directly.
+        os._exit(0)
 
-    signal.signal(signal.SIGTERM, _request_shutdown)
-    signal.signal(signal.SIGINT, _request_shutdown)
+
+def main() -> None:
+    signal.signal(signal.SIGTERM, lambda *_: request_shutdown("SIGTERM"))
+    signal.signal(signal.SIGINT, lambda *_: request_shutdown("SIGINT"))
 
     async def _run() -> None:
         await start_server()
