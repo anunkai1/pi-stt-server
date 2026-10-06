@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import os
 import signal
 import sys
@@ -34,9 +33,6 @@ MIN_IDLE_MS = 60_000
 MAX_IDLE_MS = 24 * 60 * 60 * 1000
 SYSTEMD_FD = 3
 ENGINE_NAMES = ("qwen3_asr", "whisper")
-
-STATE_DIR = Path.home() / ".pi" / "stt"
-
 
 def log(*args: Any) -> None:
     print("[stt-server]", *args, flush=True)
@@ -107,18 +103,6 @@ def decode_to_16k_mono(data: bytes, max_seconds: int) -> tuple[np.ndarray, float
         container.close()
 
 
-def save_state(engine: str, model: str) -> None:
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-        (STATE_DIR / "server-state.json").write_text(
-            json.dumps({"engine": engine, "model": model, "resident": True,
-                        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}) + "\n",
-            encoding="utf-8",
-        )
-    except OSError:
-        pass
-
-
 # ── Engines ─────────────────────────────────────────────────────────
 
 
@@ -183,7 +167,6 @@ class Qwen3AsrEngine:
             except Exception as e:
                 raise EngineError(f"qwen3_asr engine failed to load: {e}")
             log(f"qwen3_asr engine ready ({self.model}, threads={self._threads})")
-            save_state(self.name, self.model)
         return self._recognizer
 
     def transcribe(self, data: bytes) -> TranscriptionResult:
@@ -237,7 +220,6 @@ class WhisperEngine:
                 )
             log(f"whisper engine ready ({self._model}, device={self._device}, "
                 f"compute={self._compute})")
-            save_state(self.name, self._model)
         return self._model_obj
 
     def transcribe(self, data: bytes) -> TranscriptionResult:
@@ -274,7 +256,7 @@ def build_engine(name: str, *, default: bool) -> Any:
             os.environ.get("WHISPER_DEVICE") or "cpu",
             os.environ.get("WHISPER_COMPUTE") or "int8",
         )
-    if default:
+    if default and not name:
         return None  # fallback disabled by empty env
     raise SystemExit(f"unknown engine '{name}' (expected one of {ENGINE_NAMES})")
 
@@ -341,6 +323,7 @@ listen_lock = asyncio.Lock()
 active_transcriptions = 0
 shutting_down = False
 need_restart = False
+restart_scheduled = False
 
 idle: IdleShutdown  # bound below, after shutdown() is defined
 
@@ -385,6 +368,19 @@ async def transcribe_chain(data: bytes) -> TranscriptionResult:
             return result
         log(f"{engine.name} produced empty transcript; escalating to fallback")
     raise last_error or EngineError("no engine produced a transcript")
+
+
+def schedule_restart_if_poisoned() -> None:
+    """After a transcription timeout the engine thread may still be wedged.
+
+    Exit shortly after the current request is answered, whatever its outcome, so
+    systemd replaces the model state. Called from a ``finally`` so a 503 caused
+    by the timeout restarts the process just like a successful fallback does.
+    """
+    global restart_scheduled
+    if need_restart and not restart_scheduled:
+        restart_scheduled = True
+        asyncio.get_running_loop().call_later(0.5, lambda: os._exit(1))
 
 
 async def handle_health(request: web.Request) -> web.Response:
@@ -432,15 +428,13 @@ async def handle_transcribe(request: web.Request) -> web.Response:
         finally:
             active_transcriptions -= 1
             idle.work_finished()
+            schedule_restart_if_poisoned()
     response: dict[str, Any] = {"text": result.text, "engine": result.engine,
                                 "model": result.model}
     if result.language:
         response["language"] = result.language
     if result.duration is not None:
         response["duration"] = result.duration
-    if need_restart:
-        # Answer first; a poisoned process must not linger with a wedged model.
-        asyncio.get_running_loop().call_later(0.5, lambda: os._exit(1))
     return web.json_response(response)
 
 

@@ -199,6 +199,29 @@ async def test_all_engines_error_returns_503(client, chain):
 # ── Lifecycle ───────────────────────────────────────────────────────
 
 
+async def test_timeout_on_last_engine_restarts_the_process(client, monkeypatch):
+    """A timed-out engine thread cannot be cancelled: answer 503, then exit."""
+    import os
+
+    monkeypatch.setattr(stt_server, "CHAIN", [FakeEngine("only", text="x", delay=0.6)])
+    monkeypatch.setattr(stt_server, "TRANSCRIBE_TIMEOUT_MS", 100)
+    monkeypatch.setattr(stt_server, "need_restart", False)
+    monkeypatch.setattr(stt_server, "restart_scheduled", False)
+    exits = []
+    monkeypatch.setattr(os, "_exit", lambda code: exits.append(code))
+    r = await client.post("/transcribe", data=make_wav(1.0))
+    assert r.status == 503
+    assert "timed out" in (await r.json())["error"]
+    await asyncio.sleep(0.8)
+    assert exits == [1]
+
+
+def test_unknown_fallback_engine_name_is_rejected():
+    with pytest.raises(SystemExit):
+        stt_server.build_engine("wisper", default=True)
+    assert stt_server.build_engine("", default=True) is None
+
+
 async def test_idle_shutdown_semantics():
     fired = []
     idle = IdleShutdown(50, lambda: fired.append(True))
