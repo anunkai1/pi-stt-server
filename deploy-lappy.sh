@@ -68,6 +68,8 @@ install -m 0644 systemd/lappy/pi-stt-server.socket "$UNIT_DIR/pi-stt-server.sock
 install -m 0644 systemd/lappy/pi-stt-server.service "$UNIT_DIR/pi-stt-server.service"
 systemctl --user daemon-reload
 systemctl --user enable --now pi-stt-server.socket
+# A health probe may have activated the old code; replace it (no-op if idle).
+systemctl --user try-restart pi-stt-server.service
 
 echo "→ Waiting for socket activation smoke"
 for _ in {1..40}; do
