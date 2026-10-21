@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Lappy-side deployment for pi-stt-server (user units, GPU whisper).
+# Lappy-side deployment for pi-stt-server (user units, GPU Bark + whisper).
 # Run ON LAPPY as the owning user. Installs/updates the user-level
-# socket-activated service that serves whisper large-v3-turbo on CUDA.
+# socket-activated service that serves Bark 3.0 Plus on CUDA, with whisper
+# large-v3-turbo (CUDA) as the fallback engine.
 #
 # Prerequisites: this checkout at ~/pi-stt-server with origin/main fetched,
 # NVIDIA driver loaded, CUDA-capable GPU.
@@ -9,10 +10,12 @@ set -Eeuo pipefail
 
 cd "$(dirname "$0")"
 LAPPY_ENV=./lappy.env
+BARK_DIR="$HOME/ai-models/underdog-bark-3.0-plus-d4fab2f8"  # matches the unit
 
 echo "→ Creating/updating venv"
 python3 -m venv venv
 venv/bin/pip install --quiet --upgrade pip
+venv/bin/pip install --quiet -r requirements-torch-cuda.txt
 venv/bin/pip install --quiet -r requirements.txt
 venv/bin/pip install --quiet -r requirements-cuda.txt
 venv/bin/pip check
@@ -42,7 +45,18 @@ n = ctranslate2.get_cuda_device_count()
 print('ct2 cuda devices:', n)
 if n < 1:
     raise SystemExit('no CUDA device visible')
+import torch
+if not torch.cuda.is_available():
+    raise SystemExit('torch sees no CUDA device')
 "
+
+if [[ -f "$BARK_DIR/model.safetensors" ]]; then
+  echo "→ Bark weights already prepared at $BARK_DIR"
+else
+  echo "→ Provisioning Bark 3.0 Plus weights (pinned, checksum-verified)"
+  mkdir -p -m 700 "$(dirname "$BARK_DIR")"
+  venv/bin/python -I prepare_bark.py "$BARK_DIR"
+fi
 
 echo "→ Running tests (fake engines)"
 venv/bin/python -m pytest test/ -q
@@ -68,11 +82,11 @@ body = json.load(open("/tmp/pi-stt-lappy-health.json"))
 if body.get("status") != "ok" or body.get("modelAvailable") is not True:
     raise SystemExit("health check failed")
 engines = body.get("engines", {})
-if set(engines) != {"whisper"}:
+if set(engines) != {"bark", "whisper"}:
     raise SystemExit(f"unexpected engine set on Lappy: {list(engines)}")
 if engines["whisper"].get("model") != "large-v3-turbo":
     raise SystemExit(f"unexpected whisper model: {engines['whisper']}")
-print("health OK:", engines["whisper"])
+print("health OK:", engines)
 PY
 
-echo "✅ pi-stt-server (Lappy, GPU whisper) deployed — lazily activated on first /transcribe"
+echo "✅ pi-stt-server (Lappy, GPU Bark + whisper fallback) deployed — lazily activated on first /transcribe"

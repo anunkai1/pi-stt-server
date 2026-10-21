@@ -222,6 +222,15 @@ def test_unknown_fallback_engine_name_is_rejected():
     assert stt_server.build_engine("", default=True) is None
 
 
+def test_bark_engine_config_and_unprepared_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("BARK_DIR", str(tmp_path / "bark"))
+    monkeypatch.setenv("BARK_DEVICE", "cuda")
+    engine = stt_server.build_engine("bark", default=False)
+    assert (engine.name, engine.model, engine._device, engine.resident) == ("bark", "bark", "cuda", False)
+    with pytest.raises(stt_server.EngineError, match="unprepared"):
+        engine.ensure()
+
+
 async def test_idle_shutdown_semantics():
     fired = []
     idle = IdleShutdown(50, lambda: fired.append(True))

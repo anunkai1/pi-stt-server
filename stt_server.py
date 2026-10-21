@@ -9,8 +9,9 @@ and configuration.
 Engines:
   qwen3_asr  — sherpa-onnx Qwen3-ASR 0.6B int8 (multilingual, silence-robust)
   whisper    — faster-whisper (PyAV decode; cpu or cuda)
+  bark       — Underdog Bark 3.0 (English-only Parakeet TDT fine-tune; cpu or cuda)
 
-Both engines decode in-process; the caller posts raw audio bytes.
+All engines decode in-process; the caller posts raw audio bytes.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ import numpy as np
 MIN_IDLE_MS = 60_000
 MAX_IDLE_MS = 24 * 60 * 60 * 1000
 SYSTEMD_FD = 3
-ENGINE_NAMES = ("qwen3_asr", "whisper")
+ENGINE_NAMES = ("qwen3_asr", "whisper", "bark")
 
 def log(*args: Any) -> None:
     print("[stt-server]", *args, flush=True)
@@ -243,6 +244,71 @@ class WhisperEngine:
                 pass
 
 
+class BarkEngine:
+    """transformers ParakeetForTDT over a Bark 3.0 model unpacked by prepare_bark.py."""
+
+    name = "bark"
+    # The evaluated setting: 0.25 s of leading silence (Bark 3.0 and Plus).
+    pad_samples = 4000
+
+    def __init__(self, model_dir: str, device: str, threads: int) -> None:
+        self._model_dir = model_dir
+        self._device = device
+        self._threads = threads
+        self._model_obj: Any = None
+        self._processor: Any = None
+
+    @property
+    def model(self) -> str:
+        return Path(self._model_dir).name
+
+    @property
+    def resident(self) -> bool:
+        return self._model_obj is not None
+
+    def ensure(self) -> Any:
+        if self._model_obj is None:
+            import torch
+            from transformers import AutoProcessor, ParakeetForTDT
+
+            base = Path(self._model_dir).expanduser()
+            if not (base / "model.safetensors").is_file():
+                raise EngineError(
+                    f"bark model directory missing or unprepared: {base} "
+                    "(run prepare_bark.py or set BARK_DIR)"
+                )
+            torch.set_num_threads(self._threads)
+            # fp16 on CUDA: fp32 does not fit beside Lappy's desktop in 4 GB.
+            dtype = torch.float16 if self._device == "cuda" else torch.float32
+            try:
+                self._processor = AutoProcessor.from_pretrained(base)
+                self._model_obj = ParakeetForTDT.from_pretrained(base, dtype=dtype).eval().to(self._device)
+            except Exception as e:
+                raise EngineError(f"bark engine failed to load: {e}")
+            log(f"bark engine ready ({self.model}, device={self._device}, threads={self._threads})")
+        return self._model_obj
+
+    def transcribe(self, data: bytes) -> TranscriptionResult:
+        import torch
+
+        model_obj = self.ensure()
+        samples, original_duration = decode_to_16k_mono(data, MAX_AUDIO_SECONDS)
+        wave = np.concatenate([np.zeros(self.pad_samples, np.float32), samples])
+        inputs = self._processor([wave], sampling_rate=16000, return_tensors="pt", padding=True)
+        dtype = next(model_obj.parameters()).dtype
+        inputs = {k: v.to(self._device, dtype) if v.dtype.is_floating_point else v.to(self._device)
+                  for k, v in inputs.items()}
+        started = time.monotonic()
+        with torch.inference_mode():
+            out = model_obj.generate(**inputs)
+        text = self._processor.batch_decode(out.sequences, skip_special_tokens=True)[0].strip()
+        log(f"bark: decoded {len(samples) / 16000:.1f}s in {(time.monotonic() - started) * 1000:.0f}ms")
+        return TranscriptionResult(
+            text=text, engine=self.name, model=self.model, language="en",
+            duration=original_duration or len(samples) / 16000.0,
+        )
+
+
 def build_engine(name: str, *, default: bool) -> Any:
     if name == "qwen3_asr":
         return Qwen3AsrEngine(
@@ -255,6 +321,12 @@ def build_engine(name: str, *, default: bool) -> Any:
             os.environ.get("WHISPER_MODEL") or WhisperEngine.default_model,
             os.environ.get("WHISPER_DEVICE") or "cpu",
             os.environ.get("WHISPER_COMPUTE") or "int8",
+        )
+    if name == "bark":
+        return BarkEngine(
+            os.environ.get("BARK_DIR") or str(Path.home() / "ai-models" / "underdog-bark-3.0-plus"),
+            os.environ.get("BARK_DEVICE") or "cpu",
+            parse_int_env("BARK_THREADS", 4, 1, 64),
         )
     if default and not name:
         return None  # fallback disabled by empty env

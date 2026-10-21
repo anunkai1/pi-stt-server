@@ -1,5 +1,5 @@
 [Unit]
-Description=pi-stt-server HTTP server — Lappy GPU whisper (faster-whisper CUDA)
+Description=pi-stt-server HTTP server — Lappy GPU Bark (whisper CUDA fallback)
 
 [Service]
 Type=simple
@@ -12,8 +12,11 @@ KillMode=mixed
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=pi-stt-server
-Environment=STT_PRIMARY_ENGINE=whisper
-Environment=STT_FALLBACK_ENGINE=
+Environment=STT_PRIMARY_ENGINE=bark
+Environment=STT_FALLBACK_ENGINE=whisper
+Environment=BARK_DIR=%h/ai-models/underdog-bark-3.0-plus-d4fab2f8
+Environment=BARK_DEVICE=cuda
+Environment=HF_HUB_OFFLINE=1
 Environment=WHISPER_MODEL=large-v3-turbo
 Environment=WHISPER_DEVICE=cuda
 Environment=WHISPER_COMPUTE=int8_float16
