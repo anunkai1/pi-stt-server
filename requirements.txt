@@ -1,10 +1,8 @@
 aiohttp>=3.9,<4
-faster-whisper>=1.2,<2
-# PyAV 19 dropped av.open(metadata_errors=...), which faster-whisper 1.2.1 still passes.
-av>=11,<19
+av>=11
 sherpa-onnx>=1.13,<2
 numpy>=1.26
-# Bark engine (torch comes from requirements-torch-{cpu,cuda}.txt, installed first).
+# Bark engine (torch comes from requirements-torch-cpu.txt, installed first).
 transformers>=5.19,<6
 constriction>=0.5,<0.6
 librosa>=0.11,<1  # ParakeetFeatureExtractor mel filters

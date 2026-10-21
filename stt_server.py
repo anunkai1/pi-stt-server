@@ -7,9 +7,8 @@ load, serialised work, clean idle exit. See README.md for the HTTP surface
 and configuration.
 
 Engines:
+  bark       — Underdog Bark 3.0 Plus (English-only Parakeet TDT fine-tune, CPU)
   qwen3_asr  — sherpa-onnx Qwen3-ASR 0.6B int8 (multilingual, silence-robust)
-  whisper    — faster-whisper (PyAV decode; cpu or cuda)
-  bark       — Underdog Bark 3.0 (English-only Parakeet TDT fine-tune; cpu or cuda)
 
 All engines decode in-process; the caller posts raw audio bytes.
 """
@@ -33,7 +32,7 @@ import numpy as np
 MIN_IDLE_MS = 60_000
 MAX_IDLE_MS = 24 * 60 * 60 * 1000
 SYSTEMD_FD = 3
-ENGINE_NAMES = ("qwen3_asr", "whisper", "bark")
+ENGINE_NAMES = ("bark", "qwen3_asr")
 
 def log(*args: Any) -> None:
     print("[stt-server]", *args, flush=True)
@@ -187,63 +186,6 @@ class Qwen3AsrEngine:
         )
 
 
-class WhisperEngine:
-    """faster-whisper (CTranslate2), resident; decodes via bundled PyAV."""
-
-    name = "whisper"
-    default_model = "large-v3-turbo"
-
-    def __init__(self, model: str, device: str, compute: str) -> None:
-        self._model = model
-        self._device = device
-        self._compute = compute
-        self._model_obj: Any = None
-
-    @property
-    def model(self) -> str:
-        return self._model
-
-    @property
-    def resident(self) -> bool:
-        return self._model_obj is not None
-
-    def ensure(self) -> Any:
-        if self._model_obj is None:
-            from faster_whisper import WhisperModel
-
-            try:
-                self._model_obj = WhisperModel(
-                    self._model, device=self._device, compute_type=self._compute
-                )
-            except Exception as e:
-                raise EngineError(
-                    f"whisper engine failed to load {self._model}: {e}"
-                )
-            log(f"whisper engine ready ({self._model}, device={self._device}, "
-                f"compute={self._compute})")
-        return self._model_obj
-
-    def transcribe(self, data: bytes) -> TranscriptionResult:
-        model_obj = self.ensure()
-        import tempfile
-
-        tmp = tempfile.NamedTemporaryFile(suffix=".audio", delete=False)
-        try:
-            tmp.write(data)
-            tmp.close()
-            segments, info = model_obj.transcribe(tmp.name, beam_size=1, vad_filter=True)
-            text = " ".join(s.text.strip() for s in segments).strip()
-            return TranscriptionResult(
-                text=text, engine=self.name, model=self.model,
-                language=info.language, duration=info.duration,
-            )
-        finally:
-            try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
-
-
 class BarkEngine:
     """transformers ParakeetForTDT over a Bark 3.0 model unpacked by prepare_bark.py."""
 
@@ -251,9 +193,8 @@ class BarkEngine:
     # The evaluated setting: 0.25 s of leading silence (Bark 3.0 and Plus).
     pad_samples = 4000
 
-    def __init__(self, model_dir: str, device: str, threads: int) -> None:
+    def __init__(self, model_dir: str, threads: int) -> None:
         self._model_dir = model_dir
-        self._device = device
         self._threads = threads
         self._model_obj: Any = None
         self._processor: Any = None
@@ -278,14 +219,12 @@ class BarkEngine:
                     "(run prepare_bark.py or set BARK_DIR)"
                 )
             torch.set_num_threads(self._threads)
-            # fp16 on CUDA: fp32 does not fit beside Lappy's desktop in 4 GB.
-            dtype = torch.float16 if self._device == "cuda" else torch.float32
             try:
                 self._processor = AutoProcessor.from_pretrained(base)
-                self._model_obj = ParakeetForTDT.from_pretrained(base, dtype=dtype).eval().to(self._device)
+                self._model_obj = ParakeetForTDT.from_pretrained(base, dtype=torch.float32).eval()
             except Exception as e:
                 raise EngineError(f"bark engine failed to load: {e}")
-            log(f"bark engine ready ({self.model}, device={self._device}, threads={self._threads})")
+            log(f"bark engine ready ({self.model}, threads={self._threads})")
         return self._model_obj
 
     def transcribe(self, data: bytes) -> TranscriptionResult:
@@ -295,9 +234,6 @@ class BarkEngine:
         samples, original_duration = decode_to_16k_mono(data, MAX_AUDIO_SECONDS)
         wave = np.concatenate([np.zeros(self.pad_samples, np.float32), samples])
         inputs = self._processor([wave], sampling_rate=16000, return_tensors="pt", padding=True)
-        dtype = next(model_obj.parameters()).dtype
-        inputs = {k: v.to(self._device, dtype) if v.dtype.is_floating_point else v.to(self._device)
-                  for k, v in inputs.items()}
         started = time.monotonic()
         with torch.inference_mode():
             out = model_obj.generate(**inputs)
@@ -316,16 +252,9 @@ def build_engine(name: str, *, default: bool) -> Any:
             or str(Path.home() / ".pi" / "stt" / "models" / Qwen3AsrEngine.default_model),
             parse_int_env("QWEN3_THREADS", 4, 1, 64),
         )
-    if name == "whisper":
-        return WhisperEngine(
-            os.environ.get("WHISPER_MODEL") or WhisperEngine.default_model,
-            os.environ.get("WHISPER_DEVICE") or "cpu",
-            os.environ.get("WHISPER_COMPUTE") or "int8",
-        )
     if name == "bark":
         return BarkEngine(
             os.environ.get("BARK_DIR") or str(Path.home() / "ai-models" / "underdog-bark-3.0-plus"),
-            os.environ.get("BARK_DEVICE") or "cpu",
             parse_int_env("BARK_THREADS", 4, 1, 64),
         )
     if default and not name:
@@ -381,8 +310,8 @@ class IdleShutdown:
 
 # ── Server state ────────────────────────────────────────────────────
 
-PRIMARY = build_engine(os.environ.get("STT_PRIMARY_ENGINE") or "qwen3_asr", default=False)
-FALLBACK = build_engine(os.environ.get("STT_FALLBACK_ENGINE", "whisper"), default=True)
+PRIMARY = build_engine(os.environ.get("STT_PRIMARY_ENGINE") or "bark", default=False)
+FALLBACK = build_engine(os.environ.get("STT_FALLBACK_ENGINE", "qwen3_asr"), default=True)
 CHAIN = [PRIMARY] + ([FALLBACK] if FALLBACK else [])
 
 IDLE_TIMEOUT_MS = parse_int_env("STT_IDLE_TIMEOUT_MS", 1_800_000, MIN_IDLE_MS, MAX_IDLE_MS)

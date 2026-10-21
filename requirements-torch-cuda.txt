@@ -1,3 +1,0 @@
-# CUDA PyTorch for the Bark engine on Lappy's GTX 1650; install before requirements.txt.
---index-url https://download.pytorch.org/whl/cu128
-torch>=2.8,<3
