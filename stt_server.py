@@ -125,6 +125,9 @@ class Qwen3AsrEngine:
 
     name = "qwen3_asr"
     default_model = "qwen3-asr-0.6B-int8-2026-03-25"
+    # The packaged ONNX decoder has a 512-token context, including audio.
+    # Short windows leave room for text and prevent silent audio truncation.
+    chunk_samples = 20 * 16000
 
     def __init__(self, model_dir: str, threads: int) -> None:
         self._model_dir = model_dir
@@ -170,16 +173,19 @@ class Qwen3AsrEngine:
         return self._recognizer
 
     def transcribe(self, data: bytes) -> TranscriptionResult:
-        recognizer = self.ensure()
         samples, original_duration = decode_to_16k_mono(data, MAX_AUDIO_SECONDS)
-        stream = recognizer.create_stream()
-        stream.accept_waveform(16000, samples)
+        recognizer = self.ensure()
         started = time.monotonic()
-        recognizer.decode_stream(stream)
+        texts = []
+        for start in range(0, len(samples), self.chunk_samples):
+            stream = recognizer.create_stream()
+            stream.accept_waveform(16000, samples[start:start + self.chunk_samples])
+            recognizer.decode_stream(stream)
+            texts.append(stream.result.text.strip())
         decode_ms = (time.monotonic() - started) * 1000
         log(f"qwen3_asr: decoded {len(samples) / 16000:.1f}s in {decode_ms:.0f}ms")
         return TranscriptionResult(
-            text=stream.result.text.strip(),
+            text=" ".join(text for text in texts if text),
             engine=self.name,
             model=self.model,
             duration=original_duration or len(samples) / 16000.0,
@@ -228,10 +234,10 @@ class BarkEngine:
         return self._model_obj
 
     def transcribe(self, data: bytes) -> TranscriptionResult:
+        samples, original_duration = decode_to_16k_mono(data, MAX_AUDIO_SECONDS)
         import torch
 
         model_obj = self.ensure()
-        samples, original_duration = decode_to_16k_mono(data, MAX_AUDIO_SECONDS)
         wave = np.concatenate([np.zeros(self.pad_samples, np.float32), samples])
         inputs = self._processor([wave], sampling_rate=16000, return_tensors="pt", padding=True)
         started = time.monotonic()
@@ -310,14 +316,16 @@ class IdleShutdown:
 
 # ── Server state ────────────────────────────────────────────────────
 
-PRIMARY = build_engine(os.environ.get("STT_PRIMARY_ENGINE") or "bark", default=False)
-FALLBACK = build_engine(os.environ.get("STT_FALLBACK_ENGINE", "qwen3_asr"), default=True)
+# English-only Bark cannot reliably detect that a multilingual request failed.
+# Use Qwen by default; Bark remains an explicit English-only configuration.
+PRIMARY = build_engine(os.environ.get("STT_PRIMARY_ENGINE") or "qwen3_asr", default=False)
+FALLBACK = build_engine(os.environ.get("STT_FALLBACK_ENGINE", ""), default=True)
 CHAIN = [PRIMARY] + ([FALLBACK] if FALLBACK else [])
 
 IDLE_TIMEOUT_MS = parse_int_env("STT_IDLE_TIMEOUT_MS", 1_800_000, MIN_IDLE_MS, MAX_IDLE_MS)
 TRANSCRIBE_TIMEOUT_MS = parse_int_env("STT_TIMEOUT_MS", 300_000, 10_000, 3_600_000)
 MAX_AUDIO_BYTES = parse_int_env("STT_MAX_AUDIO_BYTES", 25 * 1024 * 1024, 1024 * 1024, 512 * 1024 * 1024)
-MAX_AUDIO_SECONDS = parse_int_env("STT_MAX_AUDIO_SECONDS", 3600, 10, 86_400)
+MAX_AUDIO_SECONDS = parse_int_env("STT_MAX_AUDIO_SECONDS", 300, 10, 300)
 SHUTDOWN_DRAIN_TIMEOUT_MS = parse_int_env("SHUTDOWN_DRAIN_TIMEOUT_MS", 600_000, 10_000, 3_600_000)
 
 listen_lock = asyncio.Lock()
@@ -395,6 +403,7 @@ async def handle_health(request: web.Request) -> web.Response:
             "idleTimeoutMs": IDLE_TIMEOUT_MS,
             "timeoutMs": TRANSCRIBE_TIMEOUT_MS,
             "maxAudioBytes": MAX_AUDIO_BYTES,
+            "maxAudioSeconds": MAX_AUDIO_SECONDS,
             "activeTranscriptions": active_transcriptions,
             "status": "draining" if shutting_down else "ok",
         }

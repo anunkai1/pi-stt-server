@@ -120,6 +120,7 @@ async def test_health_contract(client):
     assert body["status"] == "ok"
     assert "engines" in body
     assert "idleTimeoutMs" in body
+    assert body["maxAudioSeconds"] == stt_server.MAX_AUDIO_SECONDS
 
 
 async def test_transcribe_roundtrip(client, chain):
@@ -194,6 +195,58 @@ async def test_all_engines_error_returns_503(client, chain):
     assert resp.status == 503
     body = await resp.json()
     assert "boom" in body["error"]
+
+
+def test_qwen_windows_cover_all_audio_without_exceeding_decoder_context(monkeypatch):
+    from types import SimpleNamespace
+    engine = stt_server.Qwen3AsrEngine("fake", 1)
+    chunks = []
+    def create_stream():
+        return SimpleNamespace(
+            accept_waveform=lambda rate, pcm: chunks.append(pcm.copy()),
+            result=SimpleNamespace(text=f"part {len(chunks) + 1}"),
+        )
+    monkeypatch.setattr(engine, "ensure", lambda: SimpleNamespace(create_stream=create_stream, decode_stream=lambda stream: None))
+    samples = np.arange(45 * 16000, dtype=np.float32)
+    monkeypatch.setattr(stt_server, "decode_to_16k_mono", lambda *args: (samples, 45))
+    result = engine.transcribe(b"audio")
+    assert [len(chunk) for chunk in chunks] == [20 * 16000, 20 * 16000, 5 * 16000]
+    np.testing.assert_array_equal(np.concatenate(chunks), samples)
+    assert result.text == "part 1 part 2 part 3" and result.duration == 45
+
+
+def test_default_chain_is_multilingual_and_limit_is_bounded():
+    import os
+    import subprocess
+    import sys
+    env = dict(os.environ)
+    for key in ("STT_PRIMARY_ENGINE", "STT_FALLBACK_ENGINE", "STT_MAX_AUDIO_SECONDS"):
+        env.pop(key, None)
+    probe = "import stt_server as s; print([e.name for e in s.CHAIN], s.MAX_AUDIO_SECONDS)"
+    result = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == "['qwen3_asr'] 300"
+    result = subprocess.run([sys.executable, "-c", probe], env={**env, "STT_MAX_AUDIO_SECONDS": "3600"}, capture_output=True)
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("engine_class", [stt_server.BarkEngine, stt_server.Qwen3AsrEngine])
+def test_long_audio_rejected_before_model_loading(monkeypatch, engine_class):
+    monkeypatch.setattr(stt_server, "MAX_AUDIO_SECONDS", 1)
+    engine = engine_class("not-loaded", 1)
+    def no_load():
+        pytest.fail("must reject long audio before loading weights")
+    monkeypatch.setattr(engine, "ensure", no_load)
+    with pytest.raises(AudioTooLong, match="1s limit"):
+        engine.transcribe(make_wav(2))
+
+
+async def test_audio_limit_is_413_without_fallback(client, chain):
+    primary, fallback = chain
+    primary._error = AudioTooLong("decoded audio exceeds 300s limit")
+    response = await client.post("/transcribe", data=b"too-long")
+    assert response.status == 413
+    assert "300s" in (await response.json())["error"]
+    assert fallback.calls == []
 
 
 # ── Lifecycle ───────────────────────────────────────────────────────
