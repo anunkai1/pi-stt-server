@@ -3,7 +3,8 @@
 
     prepare_bark.py OUT_DIR
 
-The files are fetched at a pinned Hugging Face revision and checksum-verified.
+The model archive, loader and NOTICE are revision-pinned and checksum-verified;
+the processor is fetched at its own immutable Hugging Face revision.
 Decoding the entropy-coded model.bark takes ~25 s, so it is done once here
 rather than on every cold start; the result loads in well under a second and
 is bit-identical to what the official loader produces. The processor files
@@ -20,6 +21,7 @@ from pathlib import Path
 
 REPO = "ConwayResearch/Underdog-Bark-3.0-Plus"
 REVISION = "d4fab2f8b95681e5ad3cfb4e8c5f4e0c009b3deb"
+PROCESSOR_REVISION = "541d1f99c6b0c3cd0b11a95167540bb8edefd82b"
 SHA256 = {
     "model.bark": "fdd9f1052e4fdead07d71e8cd2138813eb0c209fd6ff8b1b6f47737e1e501857",
     "bark_loader.py": "e86b7f130bec1a8fa14dd315cfce95785b890dbd30000f6ceb2597fdd4312b02",
@@ -49,7 +51,9 @@ def main() -> None:
         partial = out.with_name(out.name + ".partial")
         shutil.rmtree(partial, ignore_errors=True)
         loader.load_model(str(src / "model.bark")).save_pretrained(partial)
-        AutoProcessor.from_pretrained("nvidia/parakeet-tdt-0.6b-v3").save_pretrained(partial)
+        AutoProcessor.from_pretrained(
+            "nvidia/parakeet-tdt-0.6b-v3", revision=PROCESSOR_REVISION,
+        ).save_pretrained(partial)
         shutil.copy(src / "NOTICE", partial / "NOTICE")
     shutil.rmtree(out, ignore_errors=True)
     partial.rename(out)
