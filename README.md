@@ -76,7 +76,7 @@ plain transformers.
                            audio may arrive
     STT_IDLE_TIMEOUT_MS    default 1800000 (30 min); min 60s, max 24h
     STT_TIMEOUT_MS         default 300000 (5 min per transcription)
-    STT_MAX_AUDIO_BYTES    default 25165824 (25 MiB request cap)
+    STT_MAX_AUDIO_BYTES    default 26214400 (25 MiB request cap)
     STT_MAX_AUDIO_SECONDS  default 300 (5 min); min 10, max 300
     BARK_DIR               default ~/ai-models/underdog-bark-3.0-plus (prepare_bark.py output)
     BARK_THREADS           default 4
