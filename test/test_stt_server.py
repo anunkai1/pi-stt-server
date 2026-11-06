@@ -215,7 +215,7 @@ def test_qwen_windows_cover_all_audio_without_exceeding_decoder_context(monkeypa
     assert result.text == "part 1 part 2 part 3" and result.duration == 45
 
 
-def test_default_chain_is_multilingual_and_limit_is_bounded():
+def test_default_chain_is_bark_and_limit_is_bounded():
     import os
     import subprocess
     import sys
@@ -224,7 +224,7 @@ def test_default_chain_is_multilingual_and_limit_is_bounded():
         env.pop(key, None)
     probe = "import stt_server as s; print([e.name for e in s.CHAIN], s.MAX_AUDIO_SECONDS)"
     result = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True, check=True)
-    assert result.stdout.strip() == "['qwen3_asr'] 300"
+    assert result.stdout.strip() == "['bark'] 300"
     result = subprocess.run([sys.executable, "-c", probe], env={**env, "STT_MAX_AUDIO_SECONDS": "3600"}, capture_output=True)
     assert result.returncode != 0
 

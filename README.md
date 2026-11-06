@@ -30,8 +30,8 @@ Runs on Server2's CPU only.
 
 | Engine | Library | Notes |
 |---|---|---|
-| `bark` (optional, English only) | transformers `ParakeetForTDT`, Underdog Bark 3.0 Plus | **English only**. ~3 GB RSS. `prepare_bark.py OUT_DIR` downloads the pinned revision and unpacks it once (cold load 0.2 s instead of ~25 s) |
-| `qwen3_asr` (default) | sherpa-onnx, `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25` | multilingual (incl. Russian), silence-robust, ~1 GB |
+| `bark` (default, English only) | transformers `ParakeetForTDT`, Underdog Bark 3.0 Plus | **English only**. ~3 GB RSS. `prepare_bark.py OUT_DIR` downloads the pinned revision and unpacks it once (cold load 0.2 s instead of ~25 s) |
+| `qwen3_asr` (multilingual) | sherpa-onnx, `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25` | multilingual (incl. Russian), silence-robust, ~1 GB |
 
 Benchmark, 21/10/2026: 66 Open ASR Leaderboard clips (AMI, Earnings-22,
 LibriSpeech other, Common Voice, VoxPopuli; 5–25 s; ~10 min), leaderboard
@@ -46,11 +46,11 @@ Server2's CPU unless noted:
 Bark ran no faster on the GTX 1650 than on this CPU (greedy TDT decoding is
 per-step and host-bound), so the GPU copy and the whisper engine were retired.
 
-Qwen is the default so Russian and other non-English speech is not silently
-returned as English gibberish. The fallback is disabled by default: an
-English-only engine is not a safe fallback for arbitrary languages. For an
-explicitly English-only installation, Bark can still be selected with
-`STT_PRIMARY_ENGINE=bark`.
+Bark is the default: it is 4.5 points more accurate and roughly twice as fast
+as Qwen on the clips above. The trade-off is that it is English-only and
+returns English gibberish for other languages, so Qwen must be selected with
+`STT_PRIMARY_ENGINE=qwen3_asr` for non-English speech. Both engines are shipped
+provisioned, so switching is an env change and a restart.
 
 Audio longer than five minutes is rejected with HTTP 413 before model loading;
 raising the limit beyond 300 seconds is rejected at startup. This bounds Bark's
@@ -71,8 +71,9 @@ plain transformers.
 
     STT_HOST               default 127.0.0.1
     STT_PORT               default 8182 (ignored under systemd socket activation)
-    STT_PRIMARY_ENGINE     default qwen3_asr
-    STT_FALLBACK_ENGINE    default "" (disabled)
+    STT_PRIMARY_ENGINE     default bark
+    STT_FALLBACK_ENGINE    default "" (disabled); set qwen3_asr if non-English
+                           audio may arrive
     STT_IDLE_TIMEOUT_MS    default 1800000 (30 min); min 60s, max 24h
     STT_TIMEOUT_MS         default 300000 (5 min per transcription)
     STT_MAX_AUDIO_BYTES    default 25165824 (25 MiB request cap)
