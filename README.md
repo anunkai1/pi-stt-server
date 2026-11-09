@@ -72,8 +72,8 @@ plain transformers.
     STT_HOST               default 127.0.0.1
     STT_PORT               default 8182 (ignored under systemd socket activation)
     STT_PRIMARY_ENGINE     default bark
-    STT_FALLBACK_ENGINE    default "" (disabled); set qwen3_asr if non-English
-                           audio may arrive
+    STT_FALLBACK_ENGINE    default "" (disabled); runs after an engine error or
+                           empty transcript, not on a language mismatch
     STT_IDLE_TIMEOUT_MS    default 1800000 (30 min); min 60s, max 24h
     STT_TIMEOUT_MS         default 300000 (5 min per transcription)
     STT_MAX_AUDIO_BYTES    default 26214400 (25 MiB request cap)

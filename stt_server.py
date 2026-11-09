@@ -317,8 +317,8 @@ class IdleShutdown:
 # ── Server state ────────────────────────────────────────────────────
 
 # Bark is the default: it is the most accurate and fastest engine here, and this
-# daemon serves owner dictation, which is English. Qwen stays available for
-# non-English audio via STT_PRIMARY_ENGINE=qwen3_asr or the fallback slot.
+# daemon serves owner dictation, which is English. Select Qwen as primary for
+# other languages; fallback handles errors/empty output, not language mismatch.
 PRIMARY = build_engine(os.environ.get("STT_PRIMARY_ENGINE") or "bark", default=False)
 FALLBACK = build_engine(os.environ.get("STT_FALLBACK_ENGINE", ""), default=True)
 CHAIN = [PRIMARY] + ([FALLBACK] if FALLBACK else [])
