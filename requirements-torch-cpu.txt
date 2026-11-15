@@ -1,3 +1,0 @@
-# CPU-only PyTorch for the Bark engine; install before requirements.txt.
---index-url https://download.pytorch.org/whl/cpu
-torch>=2.8,<3

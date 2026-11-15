@@ -1,10 +1,7 @@
 aiohttp>=3.9,<4
 av>=11
-sherpa-onnx>=1.13,<2
+huggingface_hub>=0.25
 numpy>=1.26
-# Bark engine (torch comes from requirements-torch-cpu.txt, installed first).
-transformers>=5.19,<6
-constriction>=0.5,<0.6
-librosa>=0.11,<1  # ParakeetFeatureExtractor mel filters
+sherpa-onnx>=1.13,<2
 pytest>=8
 pytest-asyncio>=0.24

@@ -6,11 +6,11 @@ Mirrors pi-voice-server's lifecycle: systemd socket activation, lazy engine
 load, serialised work, clean idle exit. See README.md for the HTTP surface
 and configuration.
 
-Engines:
-  bark       — Underdog Bark 3.0 Plus (English-only Parakeet TDT fine-tune, CPU)
-  qwen3_asr  — sherpa-onnx Qwen3-ASR 0.6B int8 (multilingual, silence-robust)
+Engine:
+  fluid_speech — Fluid Speech Pro 0.63B int8 ONNX via sherpa-onnx (25 European
+                 languages, automatic language detection, punctuation/casing)
 
-All engines decode in-process; the caller posts raw audio bytes.
+Decodes audio in-process; the caller posts raw audio bytes.
 """
 
 from __future__ import annotations
@@ -32,7 +32,8 @@ import numpy as np
 MIN_IDLE_MS = 60_000
 MAX_IDLE_MS = 24 * 60 * 60 * 1000
 SYSTEMD_FD = 3
-ENGINE_NAMES = ("bark", "qwen3_asr")
+ENGINE_NAMES = ("fluid_speech",)
+
 
 def log(*args: Any) -> None:
     print("[stt-server]", *args, flush=True)
@@ -59,7 +60,7 @@ class EngineError(Exception):
     pass
 
 
-# ── Audio decoding (shared by both engines) ─────────────────────────
+# ── Audio decoding ──────────────────────────────────────────────────
 
 
 def decode_to_16k_mono(data: bytes, max_seconds: int) -> tuple[np.ndarray, float]:
@@ -103,7 +104,7 @@ def decode_to_16k_mono(data: bytes, max_seconds: int) -> tuple[np.ndarray, float
         container.close()
 
 
-# ── Engines ─────────────────────────────────────────────────────────
+# ── Engine ──────────────────────────────────────────────────────────
 
 
 class TranscriptionResult:
@@ -120,14 +121,24 @@ class TranscriptionResult:
         self.duration = duration
 
 
-class Qwen3AsrEngine:
-    """sherpa-onnx OfflineRecognizer over the packaged Qwen3-ASR 0.6B int8 model."""
+class FluidSpeechEngine:
+    """sherpa-onnx OfflineRecognizer over Fluid Speech Pro 0.63B int8 ONNX."""
 
-    name = "qwen3_asr"
-    default_model = "qwen3-asr-0.6B-int8-2026-03-25"
-    # The packaged ONNX decoder has a 512-token context, including audio.
-    # Short windows leave room for text and prevent silent audio truncation.
-    chunk_samples = 20 * 16000
+    name = "fluid_speech"
+    default_model = "fluid-speech-pro-onnx-fa588e9f"
+    # Fluid Speech Pro ONNX is qualified for clips up to 30 seconds; 30-second
+    # windows transcribe ordinary voice notes in a single pass while keeping
+    # memory bounded up to the 5-minute request ceiling.
+    chunk_samples = 30 * 16000
+    required_files = (
+        "encoder-model.int8.onnx",
+        "encoder-model.int8.onnx.data",
+        "decoder.int8.onnx",
+        "decoder.int8.onnx.data",
+        "joiner.int8.onnx",
+        "joiner.int8.onnx.data",
+        "vocab.txt",
+    )
 
     def __init__(self, model_dir: str, threads: int) -> None:
         self._model_dir = model_dir
@@ -149,27 +160,27 @@ class Qwen3AsrEngine:
             base = Path(self._model_dir).expanduser()
             if not base.is_dir():
                 raise EngineError(
-                    f"qwen3_asr model directory missing: {base} "
-                    "(pre-populate it or set QWEN3_ASR_DIR)"
+                    f"fluid_speech model directory missing: {base} "
+                    "(run prepare_fluid_speech.py or set FLUID_SPEECH_DIR)"
                 )
-            for required in ("conv_frontend.onnx", "encoder.int8.onnx",
-                             "decoder.int8.onnx", "tokenizer"):
-                if not (base / required).exists():
+            for required in self.required_files:
+                if not (base / required).is_file():
                     raise EngineError(
-                        f"qwen3_asr model directory incomplete: "
+                        f"fluid_speech model directory incomplete: "
                         f"missing {required} in {base}"
                     )
             try:
-                self._recognizer = sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
-                    conv_frontend=str(base / "conv_frontend.onnx"),
-                    encoder=str(base / "encoder.int8.onnx"),
+                self._recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
+                    encoder=str(base / "encoder-model.int8.onnx"),
                     decoder=str(base / "decoder.int8.onnx"),
-                    tokenizer=str(base / "tokenizer"),
+                    joiner=str(base / "joiner.int8.onnx"),
+                    tokens=str(base / "vocab.txt"),
+                    model_type="nemo_transducer",
                     num_threads=self._threads,
                 )
             except Exception as e:
-                raise EngineError(f"qwen3_asr engine failed to load: {e}")
-            log(f"qwen3_asr engine ready ({self.model}, threads={self._threads})")
+                raise EngineError(f"fluid_speech engine failed to load: {e}")
+            log(f"fluid_speech engine ready ({self.model}, threads={self._threads})")
         return self._recognizer
 
     def transcribe(self, data: bytes) -> TranscriptionResult:
@@ -183,7 +194,7 @@ class Qwen3AsrEngine:
             recognizer.decode_stream(stream)
             texts.append(stream.result.text.strip())
         decode_ms = (time.monotonic() - started) * 1000
-        log(f"qwen3_asr: decoded {len(samples) / 16000:.1f}s in {decode_ms:.0f}ms")
+        log(f"fluid_speech: decoded {len(samples) / 16000:.1f}s in {decode_ms:.0f}ms")
         return TranscriptionResult(
             text=" ".join(text for text in texts if text),
             engine=self.name,
@@ -192,76 +203,12 @@ class Qwen3AsrEngine:
         )
 
 
-class BarkEngine:
-    """transformers ParakeetForTDT over a Bark 3.0 model unpacked by prepare_bark.py."""
-
-    name = "bark"
-    # The evaluated setting: 0.25 s of leading silence (Bark 3.0 and Plus).
-    pad_samples = 4000
-
-    def __init__(self, model_dir: str, threads: int) -> None:
-        self._model_dir = model_dir
-        self._threads = threads
-        self._model_obj: Any = None
-        self._processor: Any = None
-
-    @property
-    def model(self) -> str:
-        return Path(self._model_dir).name
-
-    @property
-    def resident(self) -> bool:
-        return self._model_obj is not None
-
-    def ensure(self) -> Any:
-        if self._model_obj is None:
-            import torch
-            from transformers import AutoProcessor, ParakeetForTDT
-
-            base = Path(self._model_dir).expanduser()
-            if not (base / "model.safetensors").is_file():
-                raise EngineError(
-                    f"bark model directory missing or unprepared: {base} "
-                    "(run prepare_bark.py or set BARK_DIR)"
-                )
-            torch.set_num_threads(self._threads)
-            try:
-                self._processor = AutoProcessor.from_pretrained(base)
-                self._model_obj = ParakeetForTDT.from_pretrained(base, dtype=torch.float32).eval()
-            except Exception as e:
-                raise EngineError(f"bark engine failed to load: {e}")
-            log(f"bark engine ready ({self.model}, threads={self._threads})")
-        return self._model_obj
-
-    def transcribe(self, data: bytes) -> TranscriptionResult:
-        samples, original_duration = decode_to_16k_mono(data, MAX_AUDIO_SECONDS)
-        import torch
-
-        model_obj = self.ensure()
-        wave = np.concatenate([np.zeros(self.pad_samples, np.float32), samples])
-        inputs = self._processor([wave], sampling_rate=16000, return_tensors="pt", padding=True)
-        started = time.monotonic()
-        with torch.inference_mode():
-            out = model_obj.generate(**inputs)
-        text = self._processor.batch_decode(out.sequences, skip_special_tokens=True)[0].strip()
-        log(f"bark: decoded {len(samples) / 16000:.1f}s in {(time.monotonic() - started) * 1000:.0f}ms")
-        return TranscriptionResult(
-            text=text, engine=self.name, model=self.model, language="en",
-            duration=original_duration or len(samples) / 16000.0,
-        )
-
-
 def build_engine(name: str, *, default: bool) -> Any:
-    if name == "qwen3_asr":
-        return Qwen3AsrEngine(
-            os.environ.get("QWEN3_ASR_DIR")
-            or str(Path.home() / ".pi" / "stt" / "models" / Qwen3AsrEngine.default_model),
-            parse_int_env("QWEN3_THREADS", 4, 1, 64),
-        )
-    if name == "bark":
-        return BarkEngine(
-            os.environ.get("BARK_DIR") or str(Path.home() / "ai-models" / "underdog-bark-3.0-plus"),
-            parse_int_env("BARK_THREADS", 4, 1, 64),
+    if name == "fluid_speech":
+        return FluidSpeechEngine(
+            os.environ.get("FLUID_SPEECH_DIR")
+            or str(Path.home() / "ai-models" / FluidSpeechEngine.default_model),
+            parse_int_env("FLUID_SPEECH_THREADS", 4, 1, 64),
         )
     if default and not name:
         return None  # fallback disabled by empty env
@@ -316,10 +263,7 @@ class IdleShutdown:
 
 # ── Server state ────────────────────────────────────────────────────
 
-# Bark is the default: it is the most accurate and fastest engine here, and this
-# daemon serves owner dictation, which is English. Select Qwen as primary for
-# other languages; fallback handles errors/empty output, not language mismatch.
-PRIMARY = build_engine(os.environ.get("STT_PRIMARY_ENGINE") or "bark", default=False)
+PRIMARY = build_engine(os.environ.get("STT_PRIMARY_ENGINE") or "fluid_speech", default=False)
 FALLBACK = build_engine(os.environ.get("STT_FALLBACK_ENGINE", ""), default=True)
 CHAIN = [PRIMARY] + ([FALLBACK] if FALLBACK else [])
 
@@ -368,7 +312,7 @@ async def transcribe_chain(data: bytes) -> TranscriptionResult:
             )
             log(str(last_error))
             continue
-        except AudioTooLong as e:
+        except AudioTooLong:
             raise  # deterministic rejection: do not escalate
         except Exception as e:
             last_error = e

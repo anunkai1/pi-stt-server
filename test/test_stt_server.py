@@ -197,9 +197,9 @@ async def test_all_engines_error_returns_503(client, chain):
     assert "boom" in body["error"]
 
 
-def test_qwen_windows_cover_all_audio_without_exceeding_decoder_context(monkeypatch):
+def test_fluid_speech_windows_cover_all_audio_within_30s_chunks(monkeypatch):
     from types import SimpleNamespace
-    engine = stt_server.Qwen3AsrEngine("fake", 1)
+    engine = stt_server.FluidSpeechEngine("fake", 1)
     chunks = []
     def create_stream():
         return SimpleNamespace(
@@ -207,15 +207,15 @@ def test_qwen_windows_cover_all_audio_without_exceeding_decoder_context(monkeypa
             result=SimpleNamespace(text=f"part {len(chunks) + 1}"),
         )
     monkeypatch.setattr(engine, "ensure", lambda: SimpleNamespace(create_stream=create_stream, decode_stream=lambda stream: None))
-    samples = np.arange(45 * 16000, dtype=np.float32)
-    monkeypatch.setattr(stt_server, "decode_to_16k_mono", lambda *args: (samples, 45))
+    samples = np.arange(65 * 16000, dtype=np.float32)
+    monkeypatch.setattr(stt_server, "decode_to_16k_mono", lambda *args: (samples, 65))
     result = engine.transcribe(b"audio")
-    assert [len(chunk) for chunk in chunks] == [20 * 16000, 20 * 16000, 5 * 16000]
+    assert [len(chunk) for chunk in chunks] == [30 * 16000, 30 * 16000, 5 * 16000]
     np.testing.assert_array_equal(np.concatenate(chunks), samples)
-    assert result.text == "part 1 part 2 part 3" and result.duration == 45
+    assert result.text == "part 1 part 2 part 3" and result.duration == 65
 
 
-def test_default_chain_is_bark_and_limit_is_bounded():
+def test_default_chain_is_fluid_speech_and_limit_is_bounded():
     import os
     import subprocess
     import sys
@@ -224,15 +224,14 @@ def test_default_chain_is_bark_and_limit_is_bounded():
         env.pop(key, None)
     probe = "import stt_server as s; print([e.name for e in s.CHAIN], s.MAX_AUDIO_SECONDS)"
     result = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True, check=True)
-    assert result.stdout.strip() == "['bark'] 300"
+    assert result.stdout.strip() == "['fluid_speech'] 300"
     result = subprocess.run([sys.executable, "-c", probe], env={**env, "STT_MAX_AUDIO_SECONDS": "3600"}, capture_output=True)
     assert result.returncode != 0
 
 
-@pytest.mark.parametrize("engine_class", [stt_server.BarkEngine, stt_server.Qwen3AsrEngine])
-def test_long_audio_rejected_before_model_loading(monkeypatch, engine_class):
+def test_long_audio_rejected_before_model_loading(monkeypatch):
     monkeypatch.setattr(stt_server, "MAX_AUDIO_SECONDS", 1)
-    engine = engine_class("not-loaded", 1)
+    engine = stt_server.FluidSpeechEngine("not-loaded", 1)
     def no_load():
         pytest.fail("must reject long audio before loading weights")
     monkeypatch.setattr(engine, "ensure", no_load)
@@ -275,11 +274,11 @@ def test_unknown_fallback_engine_name_is_rejected():
     assert stt_server.build_engine("", default=True) is None
 
 
-def test_bark_engine_config_and_unprepared_dir(monkeypatch, tmp_path):
-    monkeypatch.setenv("BARK_DIR", str(tmp_path / "bark"))
-    engine = stt_server.build_engine("bark", default=False)
-    assert (engine.name, engine.model, engine.resident) == ("bark", "bark", False)
-    with pytest.raises(stt_server.EngineError, match="unprepared"):
+def test_fluid_speech_engine_config_and_unprepared_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLUID_SPEECH_DIR", str(tmp_path / "fluid"))
+    engine = stt_server.build_engine("fluid_speech", default=False)
+    assert (engine.name, engine.model, engine.resident) == ("fluid_speech", "fluid", False)
+    with pytest.raises(stt_server.EngineError, match="missing"):
         engine.ensure()
 
 

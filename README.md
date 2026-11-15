@@ -13,8 +13,7 @@ timeout.
 
     GET  /health      → capability, residency, engine metadata
     POST /transcribe  → raw audio bytes (any container, any sample rate)
-                        → {"text": ..., "language": ..., "duration": ...,
-                           "engine": ..., "model": ..., "engineMs": ...}
+                        → {"text": ..., "duration": ..., "engine": ..., "model": ...}
 
 No multipart parsing: the caller sends the audio file's bytes as the request
 body (`Content-Type: application/octet-stream`). Audio is decoded in process
@@ -24,74 +23,55 @@ Transcriptions are serialised — one model, one caller at a time. A hung
 transcription is bounded by `STT_TIMEOUT_MS` (default 5 min) and releases the
 queue.
 
-## Engines
+## Engine
 
 Runs on Server2's CPU only.
 
 | Engine | Library | Notes |
 |---|---|---|
-| `bark` (default, English only) | transformers `ParakeetForTDT`, Underdog Bark 3.0 Plus | **English only**. ~3 GB RSS. `prepare_bark.py OUT_DIR` downloads the pinned revision and unpacks it once (cold load 0.2 s instead of ~25 s) |
-| `qwen3_asr` (multilingual) | sherpa-onnx, `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25` | multilingual (incl. Russian), silence-robust, ~1 GB |
+| `fluid_speech` (default) | `sherpa-onnx`, `FluidVoice-Labs/fluid-speech-pro-onnx` (int8, CC BY 4.0) | 0.63B FastConformer-TDT model supporting 25 European languages (including English, Russian and Ukrainian) with automatic language detection, punctuation and casing. ~1 GB RSS, ~801 MB weights. `prepare_fluid_speech.py OUT_DIR` downloads and checksum-verifies the pinned Hugging Face revision (`fa588e9f87f1b9ad0ca2e2d8f7eaf84dc3803581`). |
 
-Benchmark, 21/10/2026: 66 Open ASR Leaderboard clips (AMI, Earnings-22,
-LibriSpeech other, Common Voice, VoxPopuli; 5–25 s; ~10 min), leaderboard
-normaliser, word error rate / real-time factor / median latency per clip, on
-Server2's CPU unless noted:
+Benchmark on Server2's CPU (4 threads, 66 Open ASR Leaderboard clips across AMI,
+Earnings-22, LibriSpeech other, Common Voice, VoxPopuli; 5–25 s; ~10 min):
 
-- Bark 3.0 Plus: 6.1 % / 0.11 / 0.9 s
-- qwen3_asr int8: 10.6 % / 0.24 / 1.9 s
-- whisper large-v3-turbo: 10.5 % / 1.62 (11.2 % / 0.37 / 3.2 s on a GTX 1650)
-- whisper small: 17.2 % / 0.35
+- Fluid Speech Pro (`sherpa-onnx` int8): 6.56 % WER / 0.155 RTF / 0.9 s cold load
+- Bark 3.0 Plus (`transformers` fp32, retired — English-only): 6.14 % WER / 0.111 RTF
+- qwen3_asr int8 (retired): 10.60 % WER / 0.241 RTF
+- whisper large-v3-turbo (retired): 10.53 % WER / 1.617 RTF
+- whisper small (retired): 17.22 % WER / 0.351 RTF
 
-Bark ran no faster on the GTX 1650 than on this CPU (greedy TDT decoding is
-per-step and host-bound), so the GPU copy and the whisper engine were retired.
-
-Bark is the default: it is 4.5 points more accurate and roughly twice as fast
-as Qwen on the clips above. The trade-off is that it is English-only and
-returns English gibberish for other languages, so Qwen must be selected with
-`STT_PRIMARY_ENGINE=qwen3_asr` for non-English speech. Both engines are shipped
-provisioned, so switching is an env change and a restart.
+Fluid Speech Pro replaced the earlier two-engine (`bark` + `qwen3_asr`) split on
+15/11/2026: it handles English and 24 other European languages automatically in
+a single lightweight ONNX runtime without PyTorch or `transformers`.
 
 Audio longer than five minutes is rejected with HTTP 413 before model loading;
-raising the limit beyond 300 seconds is rejected at startup. This bounds Bark's
-quadratic attention memory as well as queue time. Qwen decodes in 20-second
-windows because its packaged ONNX decoder has a 512-token context; sending a
-whole long clip silently truncates audio and substantially increases memory.
-All windows are transcribed in order. `/health` advertises
-`maxAudioSeconds`. Clients should allow the daemon's five-minute processing
-timeout and retain recordings on failure.
-
-Parakeet TDT v3 via sherpa-onnx was evaluated and rejected: the available
-PyPI/GitHub packages ship a decoder whose NeMo metadata (`vocab_size`) is
-stripped by int8 quantisation, and the fp32/sherpa export mismatches the
-runtime input layout. Bark (a Parakeet fine-tune) avoids that by running in
-plain transformers.
+raising the limit beyond 300 seconds is rejected at startup. Recordings longer
+than 30 seconds are decoded in 30-second windows (the model's qualified window
+length) and joined in order. `/health` advertises `maxAudioSeconds`. Clients
+should allow the daemon's five-minute processing timeout and retain recordings
+on failure.
 
 ## Configuration (env)
 
     STT_HOST               default 127.0.0.1
     STT_PORT               default 8182 (ignored under systemd socket activation)
-    STT_PRIMARY_ENGINE     default bark
-    STT_FALLBACK_ENGINE    default "" (disabled); runs after an engine error or
-                           empty transcript, not on a language mismatch
+    STT_PRIMARY_ENGINE     default fluid_speech
+    STT_FALLBACK_ENGINE    default "" (disabled)
     STT_IDLE_TIMEOUT_MS    default 1800000 (30 min); min 60s, max 24h
     STT_TIMEOUT_MS         default 300000 (5 min per transcription)
     STT_MAX_AUDIO_BYTES    default 26214400 (25 MiB request cap)
     STT_MAX_AUDIO_SECONDS  default 300 (5 min); min 10, max 300
-    BARK_DIR               default ~/ai-models/underdog-bark-3.0-plus (prepare_bark.py output)
-    BARK_THREADS           default 4
-    QWEN3_ASR_DIR          default ~/.pi/stt/models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25
-    QWEN3_THREADS          default 4
+    FLUID_SPEECH_DIR       default ~/ai-models/fluid-speech-pro-onnx-fa588e9f
+    FLUID_SPEECH_THREADS   default 4
     SHUTDOWN_DRAIN_TIMEOUT_MS default 600000
 
-`BARK_DIR` and `QWEN3_ASR_DIR` must be pre-populated (Bark by
-`prepare_bark.py`); the deployer provisions both. Install PyTorch from
-`requirements-torch-cpu.txt` before `requirements.txt`.
+`FLUID_SPEECH_DIR` must be pre-populated by `prepare_fluid_speech.py` (handled
+automatically by `deploy-pi-stt-server`).
 
 ## Tests
 
     venv/bin/python -m pytest test/ -q
 
-Tests cover request validation, engine chain fallback (including the
-empty-primary case), serialisation, idle-timer semantics and the HTTP routes
-with fake engines — no real weights required.
+Tests cover request validation, engine chain fallback, 30-second windowing,
+serialisation, idle-timer semantics, provisioning checksum checks and the HTTP
+routes with fake engines — no real weights required.
