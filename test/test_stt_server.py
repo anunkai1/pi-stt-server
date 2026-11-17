@@ -69,6 +69,14 @@ class FakeEngine:
         )
 
 
+@pytest.fixture(autouse=True)
+def isolated_server_state(monkeypatch):
+    monkeypatch.setattr(stt_server, "listen_lock", asyncio.Lock())
+    monkeypatch.setattr(stt_server, "need_restart", False)
+    monkeypatch.setattr(stt_server, "shutting_down", False)
+    monkeypatch.setattr(stt_server, "restart_scheduled", False)
+
+
 @pytest.fixture
 def chain(monkeypatch):
     """Replace the real engine chain with two controllable fakes."""
@@ -302,18 +310,66 @@ async def test_idle_shutdown_disarmed_by_work():
     assert fired == [True]
 
 
-def test_transcribe_serialised():
-    """Two slow calls must not overlap on one model."""
-    order = []
-    engines = [FakeEngine("a", text="A", delay=0.05), FakeEngine("b", text="B")]
+async def test_transcribe_serialised(client, monkeypatch):
+    """Exercise real HTTP handlers concurrently, not a separate local lock."""
+    import threading
+    import time
 
-    async def run():
-        lock = asyncio.Lock()
-        for engine in engines:
-            async with lock:
-                order.append(f"{engine.name}:start")
-                await asyncio.to_thread(engine.transcribe, b"")
-                order.append(f"{engine.name}:end")
+    class TrackingEngine(FakeEngine):
+        active = 0
+        maximum = 0
+        guard = threading.Lock()
 
-    asyncio.run(run())
-    assert order == ["a:start", "a:end", "b:start", "b:end"]
+        def transcribe(self, data):
+            with self.guard:
+                self.active += 1
+                self.maximum = max(self.maximum, self.active)
+            try:
+                time.sleep(0.05)
+                return super().transcribe(data)
+            finally:
+                with self.guard:
+                    self.active -= 1
+
+    engine = TrackingEngine("only", text="ok")
+    monkeypatch.setattr(stt_server, "CHAIN", [engine])
+    responses = await asyncio.gather(*(client.post("/transcribe", data=b"audio") for _ in range(3)))
+    assert [r.status for r in responses] == [200, 200, 200]
+    assert engine.maximum == 1
+    assert len(engine.calls) == 3
+
+
+async def test_queued_request_refuses_poisoned_engine(client, monkeypatch):
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+
+    class StuckEngine(FakeEngine):
+        def transcribe(self, data):
+            self.calls.append(data)
+            entered.set()
+            release.wait(timeout=2)
+            return TranscriptionResult(text="late", engine=self.name, model=self.model)
+
+    engine = StuckEngine("only")
+    monkeypatch.setattr(stt_server, "CHAIN", [engine])
+    monkeypatch.setattr(stt_server, "TRANSCRIBE_TIMEOUT_MS", 100)
+    # Never schedule a real process exit in the test.
+    monkeypatch.setattr(stt_server, "schedule_restart_if_poisoned", lambda: None)
+    first = asyncio.create_task(client.post("/transcribe", data=b"first"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        second = asyncio.create_task(client.post("/transcribe", data=b"queued"))
+        r1, r2 = await asyncio.gather(first, second)
+        assert [r1.status, r2.status] == [503, 503]
+        assert "restart" in (await r2.json())["error"]
+        assert engine.calls == [b"first"]
+    finally:
+        release.set()
+
+
+async def test_draining_refuses_new_transcription(client, chain, monkeypatch):
+    monkeypatch.setattr(stt_server, "shutting_down", True)
+    response = await client.post("/transcribe", data=b"audio")
+    assert response.status == 503
+    assert chain[0].calls == []

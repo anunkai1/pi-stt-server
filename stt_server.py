@@ -367,6 +367,10 @@ async def handle_transcribe(request: web.Request) -> web.Response:
             {"error": "no audio uploaded (send raw audio bytes)"}, status=400
         )
     async with listen_lock:
+        # Recheck after waiting: a preceding request may have poisoned the
+        # recognizer, whose timed-out native thread cannot be cancelled.
+        if need_restart or shutting_down:
+            return web.json_response({"error": "server is restarting or draining"}, status=503)
         active_transcriptions += 1
         idle.work_started()
         try:
